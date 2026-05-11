@@ -1,0 +1,81 @@
+"""Agent 6 — Skill Roadmap & Career Strategy.
+
+Produces a 3/6/12-month learning roadmap, eligible roles now, and skills that
+unlock new roles. Structured Pydantic output → no regex parsing.
+"""
+from __future__ import annotations
+import json
+from agents.state import ResumeState
+from agents.schemas import SkillRoadmap
+from agents.tracing import traced
+
+
+@traced("agent6_skill_suggestions")
+def run(state: ResumeState) -> ResumeState:
+    llm     = state["llm_client"]
+    profile = state["profile_data"]
+    skills  = profile.get("skills", [])
+    skill_names = [s["name"] for s in skills if s.get("name")]
+
+    rag_block = ""
+    hits = state.get("retrieved_jds", [])
+    if hits:
+        rag_block = (
+            "\nReference job postings (top matches from JD corpus):\n"
+            + "\n".join(f"- {h.get('role','')} ({h.get('seniority','')}): {h.get('skills','')}" for h in hits[:4])
+        )
+
+    prompt = f"""You are a senior career strategist and technical mentor.
+Build a comprehensive structured learning roadmap for this candidate.
+
+Current skills    : {', '.join(skill_names) if skill_names else 'none'}
+Skill levels      : {json.dumps(state.get('skill_level_map', {}), indent=2)}
+Skill analysis    : {state.get('skill_analysis','')[:800]}
+{rag_block}
+
+Produce structured output:
+- `domain`: their current primary technical domain
+- `eligible_roles_now`: 6-8 roles they can apply for TODAY (role, match %, why)
+- `skills_unlock_roles`: 8-10 entries of the form "Learn [Skill] (est X weeks) → Unlocks: Role1, Role2"
+- `cross_domain_opportunities`: 1-2 sentences on cross-domain roles unique to their skill mix
+- `phases`: 3 phases — "Month 1-3 (Foundation)", "Month 4-6 (Expansion)", "Month 7-12 (Specialization)" with 3-5 items each
+- `top_certifications`: 5 most impactful certs (name + provider + why)
+- `quick_wins`: 3 things to do THIS WEEK
+"""
+
+    roadmap = llm.call_structured(prompt, SkillRoadmap, temperature=0.4)
+
+    # ── Markdown rendering for UI ──────────────────────────────────────────────
+    md = []
+    if roadmap.domain:
+        md.append(f"## 🌐 Domain Identification\n{roadmap.domain}")
+    if roadmap.eligible_roles_now:
+        md.append("\n## 🎯 Roles You Can Apply For RIGHT NOW")
+        for r in roadmap.eligible_roles_now:
+            md.append(f"- **{r.role}** ({r.match_percent}%) — {r.why}")
+    if roadmap.skills_unlock_roles:
+        md.append("\n## 📚 Skills That Unlock New Roles")
+        for s in roadmap.skills_unlock_roles:
+            md.append(f"- {s}")
+    if roadmap.cross_domain_opportunities:
+        md.append(f"\n## 🔀 Cross-Domain Opportunities\n{roadmap.cross_domain_opportunities}")
+    for phase in roadmap.phases:
+        md.append(f"\n## 🗺️ {phase.phase}")
+        for it in phase.items:
+            md.append(f"- {it}")
+    if roadmap.top_certifications:
+        md.append("\n## 🏆 Top Certifications to Pursue")
+        for c in roadmap.top_certifications:
+            md.append(f"- {c}")
+    if roadmap.quick_wins:
+        md.append("\n## ⚡ 3 Quick Wins This Week")
+        for q in roadmap.quick_wins:
+            md.append(f"- {q}")
+
+    parsed = [{"phase": p.phase, "items": p.items} for p in roadmap.phases]
+
+    state["roadmap_obj"]       = roadmap
+    state["skill_suggestions"] = "\n".join(md)
+    state["roadmap_text"]      = "\n".join(md)
+    state["roadmap_parsed"]    = parsed
+    return state
